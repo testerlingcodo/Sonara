@@ -5,6 +5,7 @@ const { constants: ytdlConstants } = require('youtube-dl-exec');
 const ffmpegPath = require('ffmpeg-static');
 const ytSearch = require('yt-search');
 const fs = require('fs');
+const http = require('http');
 require('dotenv').config();
 
 const PREFIX = '!s';
@@ -663,5 +664,8 @@ client.on('messageCreate', async (message) => {
       .setDescription(`<@${mentioned.id}> is now the host and has full control over Sonara.`));
   }
 });
+
+// Keep-alive HTTP server for Render free tier
+http.createServer((req, res) => res.end('Sonara is alive!')).listen(process.env.PORT || 3000);
 
 client.login(process.env.DISCORD_TOKEN);
