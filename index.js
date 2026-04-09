@@ -197,7 +197,7 @@ class MusicQueue {
           '--get-url',
           '-f', 'bestaudio',
           '--extractor-args', 'youtube:player_client=web',
-          '--js-runtimes', 'nodejs',
+          '--js-runtimes', 'node',
           '--no-check-certificates',
         ];
         if (fs.existsSync(COOKIES_PATH)) args.push('--cookies', COOKIES_PATH);
