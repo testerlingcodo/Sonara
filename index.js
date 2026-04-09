@@ -9,6 +9,9 @@ require('dotenv').config();
 
 const PREFIX = '!s';
 
+// Use system yt-dlp (latest, installed via Dockerfile) with fallback to bundled
+const YTDLP_PATH = fs.existsSync('/usr/local/bin/yt-dlp') ? '/usr/local/bin/yt-dlp' : ytdlConstants.YOUTUBE_DL_PATH;
+
 // Write YouTube cookies file from env var (needed on cloud servers to bypass bot detection)
 const COOKIES_PATH = '/tmp/yt-cookies.txt';
 if (process.env.YOUTUBE_COOKIES) {
@@ -193,11 +196,12 @@ class MusicQueue {
           song.url,
           '--get-url',
           '-f', 'bestaudio',
-          '--extractor-args', 'youtube:player_client=mweb,web',
+          '--extractor-args', 'youtube:player_client=web',
+          '--js-runtimes', 'nodejs',
           '--no-check-certificates',
         ];
         if (fs.existsSync(COOKIES_PATH)) args.push('--cookies', COOKIES_PATH);
-        const proc = spawn(ytdlConstants.YOUTUBE_DL_PATH, args);
+        const proc = spawn(YTDLP_PATH, args);
         let out = '', err = '';
         proc.stdout.on('data', d => out += d.toString());
         proc.stderr.on('data', d => err += d.toString());
