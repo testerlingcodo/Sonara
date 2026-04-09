@@ -195,7 +195,7 @@ class MusicQueue {
         const args = [
           song.url,
           '--get-url',
-          '-f', 'bestaudio',
+          '-f', 'bestaudio/best',
           '--extractor-args', 'youtube:player_client=web',
           '--js-runtimes', 'node',
           '--no-check-certificates',
