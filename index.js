@@ -191,37 +191,41 @@ class MusicQueue {
     this.currentSong = song;
     this.isPlaying   = true;
     try {
-      const audioUrl = await new Promise((resolve, reject) => {
-        const args = [
-          song.url,
-          '--get-url',
-          '-f', 'bestaudio/best',
-          '--extractor-args', 'youtube:player_client=web',
-          '--js-runtimes', 'node',
-          '--no-check-certificates',
-        ];
-        if (fs.existsSync(COOKIES_PATH)) args.push('--cookies', COOKIES_PATH);
-        const proc = spawn(YTDLP_PATH, args);
-        let out = '', err = '';
-        proc.stdout.on('data', d => out += d.toString());
-        proc.stderr.on('data', d => err += d.toString());
-        proc.on('close', code => {
-          const line = out.trim().split('\n')[0];
-          if (code === 0 && line) resolve(line);
-          else reject(new Error(`yt-dlp error: ${err.trim() || code}`));
-        });
-      });
+      // Pipe yt-dlp stdout directly into ffmpeg — avoids signed URL issues
+      const ytdlArgs = [
+        song.url,
+        '-o', '-',
+        '-f', 'bestaudio/best',
+        '--extractor-args', 'youtube:player_client=web',
+        '--js-runtimes', 'node',
+        '--no-check-certificates',
+        '--quiet',
+      ];
+      if (fs.existsSync(COOKIES_PATH)) ytdlArgs.push('--cookies', COOKIES_PATH);
+
+      const ytdlProc = spawn(YTDLP_PATH, ytdlArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
 
       const eqFilter = this.vocalGain > 0
         ? ['-af', `equalizer=f=1000:width_type=o:width=2:g=${Math.round(this.vocalGain / 2)},equalizer=f=2500:width_type=o:width=2:g=${this.vocalGain}`]
         : [];
 
       const ffmpegProc = spawn(ffmpegPath, [
-        '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5',
-        '-i', audioUrl,
+        '-i', 'pipe:0',
         '-vn', ...eqFilter, '-c:a', 'libopus', '-b:a', '128k', '-ar', '48000', '-ac', '2', '-f', 'ogg', 'pipe:1',
-      ], { stdio: ['ignore', 'pipe', 'pipe'] });
-      ffmpegProc.stderr.on('data', d => console.error('ffmpeg:', d.toString().trim()));
+      ], { stdio: ['pipe', 'pipe', 'pipe'] });
+
+      ytdlProc.stdout.pipe(ffmpegProc.stdin);
+
+      let ytdlErr = '';
+      ytdlProc.stderr.on('data', d => { ytdlErr += d.toString(); });
+      ytdlProc.on('close', code => {
+        if (code !== 0) console.error('yt-dlp error:', ytdlErr.trim());
+        ffmpegProc.stdin.end();
+      });
+      ffmpegProc.stderr.on('data', d => {
+        const msg = d.toString();
+        if (!msg.startsWith('f') && !msg.startsWith(' ')) console.error('ffmpeg:', msg.trim());
+      });
 
       this.resource = createAudioResource(ffmpegProc.stdout, { inputType: StreamType.OggOpus, inlineVolume: true });
       this.resource.volume?.setVolume(this.volume / 100);
