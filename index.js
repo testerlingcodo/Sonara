@@ -4,9 +4,17 @@ const { spawn } = require('child_process');
 const { constants: ytdlConstants } = require('youtube-dl-exec');
 const ffmpegPath = require('ffmpeg-static');
 const ytSearch = require('yt-search');
+const fs = require('fs');
 require('dotenv').config();
 
 const PREFIX = '!s';
+
+// Write YouTube cookies file from env var (needed on cloud servers to bypass bot detection)
+const COOKIES_PATH = '/tmp/yt-cookies.txt';
+if (process.env.YOUTUBE_COOKIES) {
+  fs.writeFileSync(COOKIES_PATH, Buffer.from(process.env.YOUTUBE_COOKIES, 'base64').toString('utf8'));
+  console.log('✅ YouTube cookies loaded');
+}
 
 // Commands only the host can use
 const HOST_ONLY = new Set(['stop','skip','pause','resume','leave','clear','shuffle','remove','loop','volume','vocal','host']);
@@ -181,7 +189,15 @@ class MusicQueue {
     this.isPlaying   = true;
     try {
       const audioUrl = await new Promise((resolve, reject) => {
-        const proc = spawn(ytdlConstants.YOUTUBE_DL_PATH, [song.url, '--get-url', '-f', 'bestaudio']);
+        const args = [
+          song.url,
+          '--get-url',
+          '-f', 'bestaudio',
+          '--extractor-args', 'youtube:player_client=ios',
+          '--no-check-certificates',
+        ];
+        if (fs.existsSync(COOKIES_PATH)) args.push('--cookies', COOKIES_PATH);
+        const proc = spawn(ytdlConstants.YOUTUBE_DL_PATH, args);
         let out = '', err = '';
         proc.stdout.on('data', d => out += d.toString());
         proc.stderr.on('data', d => err += d.toString());
