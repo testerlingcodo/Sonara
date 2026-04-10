@@ -78,6 +78,57 @@ async function scrapeSpotifyPlaylist(url) {
   return tracks.map(t => `${t.name} ${t.byArtist?.name || ''}`).filter(Boolean);
 }
 
+// ─── Spotify API (Client Credentials — for clean metadata lookup) ─────────────
+let _spotifyToken = null;
+let _spotifyTokenExpiry = 0;
+
+async function getSpotifyToken() {
+  if (_spotifyToken && Date.now() < _spotifyTokenExpiry) return _spotifyToken;
+  const id  = process.env.SPOTIFY_CLIENT_ID;
+  const sec = process.env.SPOTIFY_CLIENT_SECRET;
+  if (!id || !sec) return null;
+  const res = await fetch('https://accounts.spotify.com/api/token', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Authorization: 'Basic ' + Buffer.from(`${id}:${sec}`).toString('base64'),
+    },
+    body: 'grant_type=client_credentials',
+  });
+  if (!res.ok) { console.error('[spotify] token fetch failed:', res.status); return null; }
+  const data = await res.json();
+  _spotifyToken = data.access_token;
+  _spotifyTokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
+  return _spotifyToken;
+}
+
+async function searchSpotifyByTitle(rawTitle) {
+  const token = await getSpotifyToken();
+  if (!token) return null;
+  // Strip common YouTube title noise before searching
+  const cleaned = rawTitle
+    .replace(/\(.*?(official|lyric|music|video|audio|visualizer|hd|4k|mv|teaser|live|performance|version|ver\.?|feat\.?|ft\.?).*?\)/gi, '')
+    .replace(/\[.*?(official|lyric|music|video|audio|visualizer|hd|4k|mv|teaser|live|performance|version|ver\.?|feat\.?|ft\.?).*?\]/gi, '')
+    .replace(/[-|]\s*(official|lyric|music|video|audio|hd|4k|mv)\s*(video|audio)?/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  const q = encodeURIComponent(cleaned);
+  const res = await fetch(`https://api.spotify.com/v1/search?q=${q}&type=track&limit=1`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) { console.error('[spotify] search failed:', res.status); return null; }
+  const data = await res.json();
+  const track = data.tracks?.items?.[0];
+  if (!track) return null;
+  const artist = track.artists?.[0]?.name || '';
+  const name   = track.name || '';
+  return {
+    query:     artist ? `${artist} - ${name}` : name,
+    thumbnail: track.album?.images?.[0]?.url || null,
+    title:     artist ? `${name} — ${artist}` : name,
+  };
+}
+
 // ─── Proxy audio fetch (Piped + Invidious in parallel) ────────────────────────
 // Bypasses YouTube IP restrictions on cloud servers — all sources raced at once.
 
@@ -292,12 +343,28 @@ class MusicQueue {
 
       // ── 2. SoundCloud via play-dl (YouTube is IP-blocked on cloud servers) ─────
       } else if (videoId) {
-        console.log(`[soundcloud] searching: ${song.title}`);
-        const scResults = await playdl.search(song.title, {
+        // Remember original source (e.g. 'spotify' links stay as Spotify)
+        const wasSpotify = song.source === 'spotify';
+
+        // Look up clean metadata from Spotify so SoundCloud search is accurate
+        let scQuery = song.title;
+        const spotifyMeta = wasSpotify ? null : await searchSpotifyByTitle(song.title);
+        if (spotifyMeta) {
+          console.log(`[spotify] matched: ${spotifyMeta.query}`);
+          scQuery = spotifyMeta.query;
+          if (spotifyMeta.title)     song.title     = spotifyMeta.title;
+          if (spotifyMeta.thumbnail) song.thumbnail = spotifyMeta.thumbnail;
+        } else if (wasSpotify) {
+          // Spotify-sourced song: title is already clean, use it directly
+          scQuery = song.title;
+        }
+
+        console.log(`[soundcloud] searching: ${scQuery}`);
+        const scResults = await playdl.search(scQuery, {
           source: { soundcloud: 'tracks' },
           limit: 1,
         });
-        if (!scResults.length) throw new Error(`"${song.title}" not found on SoundCloud`);
+        if (!scResults.length) throw new Error(`"${scQuery}" not found on SoundCloud`);
         const scTrack = scResults[0];
         console.log(`[soundcloud] streaming: ${scTrack.name}`);
         const scStream = await playdl.stream(scTrack.url);
@@ -307,11 +374,18 @@ class MusicQueue {
           console.error('[soundcloud] stream error:', err.message);
           ffmpegProc.stdin.destroy(err);
         });
-        // Update embed info with SoundCloud track details
-        song.source = 'soundcloud';
-        if (scTrack.name)           song.title     = scTrack.name;
-        if (scTrack.thumbnail?.url) song.thumbnail = scTrack.thumbnail.url;
-        if (scTrack.durationInSec)  song.duration  = new Date(scTrack.durationInSec * 1000).toISOString().slice(14, 19);
+        // Show Spotify branding if: original source was Spotify, OR Spotify matched the YT title
+        if (wasSpotify || spotifyMeta) {
+          song.source = 'spotify';
+          // Keep Spotify title/thumbnail already set above; only update duration from SoundCloud
+          if (scTrack.durationInSec) song.duration = new Date(scTrack.durationInSec * 1000).toISOString().slice(14, 19);
+        } else {
+          // No Spotify match — show SoundCloud info
+          song.source = 'soundcloud';
+          if (scTrack.name)           song.title     = scTrack.name;
+          if (scTrack.thumbnail?.url) song.thumbnail = scTrack.thumbnail.url;
+          if (scTrack.durationInSec)  song.duration  = new Date(scTrack.durationInSec * 1000).toISOString().slice(14, 19);
+        }
 
       // ── 3. yt-dlp for direct / non-YouTube URLs ───────────────────────────────
       } else {
@@ -386,6 +460,36 @@ async function resolveSong(query, requestedBy) {
   }
 
   if (query.includes('spotify.com/track')) {
+    const trackId = query.match(/track\/([A-Za-z0-9]+)/)?.[1];
+    const token   = trackId ? await getSpotifyToken() : null;
+    if (token) {
+      const res = await fetch(`https://api.spotify.com/v1/tracks/${trackId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const track  = await res.json();
+        const artist = track.artists?.[0]?.name || '';
+        const name   = track.name || '';
+        const scQuery = artist ? `${artist} - ${name}` : name;
+        const title   = artist ? `${name} — ${artist}` : name;
+        const thumbnail = track.album?.images?.[0]?.url || null;
+        const durationMs = track.duration_ms;
+        const duration   = durationMs
+          ? new Date(durationMs).toISOString().slice(14, 19)
+          : 'Unknown';
+        // We need a URL for the queue entry — use YouTube search result URL
+        const yt = await searchYouTube(scQuery, requestedBy);
+        return [{
+          title,
+          url:        yt?.url || `https://open.spotify.com/track/${trackId}`,
+          duration:   yt?.duration || duration,
+          thumbnail,
+          source:     'spotify',
+          requestedBy,
+        }];
+      }
+    }
+    // Fallback: scrape OG tags if Spotify API is unavailable
     const searchQuery = await scrapeSpotifyPage(query);
     const song = await searchYouTube(searchQuery, requestedBy);
     if (song) song.source = 'spotify';
@@ -393,7 +497,32 @@ async function resolveSong(query, requestedBy) {
   }
 
   if (query.includes('spotify.com/playlist') || query.includes('spotify.com/album')) {
-    const queries = await scrapeSpotifyPlaylist(query);
+    const token = await getSpotifyToken();
+    let queries;
+    if (token) {
+      // Use Spotify API for accurate track listing
+      const isAlbum = query.includes('spotify.com/album');
+      const id = query.match(/(?:playlist|album)\/([A-Za-z0-9]+)/)?.[1];
+      if (id) {
+        const endpoint = isAlbum
+          ? `https://api.spotify.com/v1/albums/${id}/tracks?limit=50`
+          : `https://api.spotify.com/v1/playlists/${id}/tracks?limit=50`;
+        const res = await fetch(endpoint, { headers: { Authorization: `Bearer ${token}` } });
+        if (res.ok) {
+          const data = await res.json();
+          const items = isAlbum ? data.items : data.items.map(i => i.track).filter(Boolean);
+          queries = items.map(t => {
+            const artist = t.artists?.[0]?.name || '';
+            const name   = t.name || '';
+            return artist ? `${artist} - ${name}` : name;
+          });
+        }
+      }
+    }
+    if (!queries) {
+      // Fallback: scrape OG tags
+      queries = await scrapeSpotifyPlaylist(query);
+    }
     const songs = await Promise.all(queries.slice(0, 50).map(q => searchYouTube(q, requestedBy)));
     return songs.filter(Boolean).map(s => ({ ...s, source: 'spotify' }));
   }
