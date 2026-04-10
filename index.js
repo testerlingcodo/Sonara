@@ -14,7 +14,8 @@ let _ytInstance = null;
 async function getYouTubeInstance() {
   if (_ytInstance) return _ytInstance;
   const { Innertube } = require('youtubei.js');
-  _ytInstance = await Innertube.create({ generate_session_locally: true });
+  // No generate_session_locally — it produces invalid visitor_data that conflicts with OAuth2
+  _ytInstance = await Innertube.create();
 
   if (process.env.YOUTUBE_OAUTH_TOKENS) {
     try {
@@ -299,7 +300,7 @@ class MusicQueue {
       } else if (videoId) {
         console.log('[youtubei] streaming');
         const yt = await getYouTubeInstance();
-        const ytStream = await yt.download(videoId, { type: 'audio', quality: 'bestefficiency' });
+        const ytStream = await yt.download(videoId, { type: 'audio', quality: 'bestefficiency', client: 'IOS' });
         const nodeStream = Readable.fromWeb(ytStream);
         ffmpegProc = spawn(ffmpegPath, ['-i', 'pipe:0', ...ffmpegOutArgs], { stdio: ['pipe', 'pipe', 'pipe'] });
         nodeStream.pipe(ffmpegProc.stdin);
