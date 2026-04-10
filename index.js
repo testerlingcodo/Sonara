@@ -235,6 +235,11 @@ class MusicQueue {
 
     this.connection.subscribe(this.player);
 
+    // Prevent unhandled 'error' events from crashing Node.js
+    this.connection.on('error', (err) => {
+      console.error('[voice] connection error:', err.message);
+    });
+
     this.player.on(AudioPlayerStatus.Idle, () => {
       if (this._restarting) return;
       if (this.loop && this.currentSong) {
