@@ -355,8 +355,8 @@ class MusicQueue {
           if (spotifyMeta.title)     song.title     = spotifyMeta.title;
           if (spotifyMeta.thumbnail) song.thumbnail = spotifyMeta.thumbnail;
         } else if (wasSpotify) {
-          // Spotify-sourced song: title is already clean, use it directly
-          scQuery = song.title;
+          // Use the stored search query (e.g. "Artist - Track"), not the display title
+          scQuery = song._scQuery || song.title;
         }
 
         console.log(`[soundcloud] searching: ${scQuery}`);
@@ -473,6 +473,7 @@ async function resolveSong(query, requestedBy) {
             duration:  info.timestamp || 'Unknown',
             thumbnail: track.album?.images?.[0]?.url || info.thumbnail,
             source:    'spotify',
+            _scQuery:  artist ? `${artist} - ${name}` : name,
             requestedBy,
           }];
         }
@@ -514,6 +515,7 @@ async function resolveSong(query, requestedBy) {
           duration:   yt?.duration || duration,
           thumbnail,
           source:     'spotify',
+          _scQuery:   scQuery,
           requestedBy,
         }];
       }
@@ -583,6 +585,7 @@ async function resolveSong(query, requestedBy) {
           duration:   yt?.duration || duration,
           thumbnail,
           source:     'spotify',
+          _scQuery:   scQuery,
           requestedBy,
         }];
       }
