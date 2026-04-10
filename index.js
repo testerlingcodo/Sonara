@@ -2,12 +2,36 @@ const { Client, GatewayIntentBits, EmbedBuilder, ActivityType, ActionRowBuilder,
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, entersState, StreamType } = require('@discordjs/voice');
 const { spawn } = require('child_process');
 const { constants: ytdlConstants } = require('youtube-dl-exec');
-const ytdl = require('@distube/ytdl-core');
+const { Readable } = require('stream');
 const ffmpegPath = require('ffmpeg-static');
 const ytSearch = require('yt-search');
 const fs = require('fs');
 const http = require('http');
 require('dotenv').config();
+
+// ─── youtubei.js (InnerTube API with OAuth2) ───────────────────────────────────
+let _ytInstance = null;
+async function getYouTubeInstance() {
+  if (_ytInstance) return _ytInstance;
+  const { Innertube } = require('youtubei.js');
+  const opts = { generate_session_locally: true };
+  if (process.env.YOUTUBE_OAUTH_TOKENS) {
+    try {
+      opts.credentials = JSON.parse(
+        Buffer.from(process.env.YOUTUBE_OAUTH_TOKENS, 'base64').toString('utf8')
+      );
+      console.log('✅ YouTube OAuth2 tokens loaded');
+    } catch { console.error('Invalid YOUTUBE_OAUTH_TOKENS env var'); }
+  }
+  _ytInstance = await Innertube.create(opts);
+  _ytInstance.session.on('update-credentials', ({ credentials }) => {
+    console.log('🔑 OAuth2 tokens refreshed — update YOUTUBE_OAUTH_TOKENS on Render:');
+    console.log(Buffer.from(JSON.stringify(credentials)).toString('base64'));
+  });
+  return _ytInstance;
+}
+// Pre-warm the instance at startup
+getYouTubeInstance().catch(e => console.error('youtubei init error:', e.message));
 
 const PREFIX = '!s';
 
@@ -262,14 +286,16 @@ class MusicQueue {
           '-i', proxyUrl, ...ffmpegOutArgs,
         ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
-      // ── 2. @distube/ytdl-core (InnerTube API — different extraction path) ────
-      } else if (videoId && ytdl.validateID(videoId)) {
-        console.log('[ytdl-core] streaming');
-        const ytdlStream = ytdl(song.url, { filter: 'audioonly', quality: 'highestaudio' });
+      // ── 2. youtubei.js InnerTube API (works with OAuth2 from any IP) ──────────
+      } else if (videoId) {
+        console.log('[youtubei] streaming');
+        const yt = await getYouTubeInstance();
+        const ytStream = await yt.download(videoId, { type: 'audio', quality: 'bestefficiency' });
+        const nodeStream = Readable.fromWeb(ytStream);
         ffmpegProc = spawn(ffmpegPath, ['-i', 'pipe:0', ...ffmpegOutArgs], { stdio: ['pipe', 'pipe', 'pipe'] });
-        ytdlStream.pipe(ffmpegProc.stdin);
-        ytdlStream.on('error', err => {
-          console.error('[ytdl-core] stream error:', err.message);
+        nodeStream.pipe(ffmpegProc.stdin);
+        nodeStream.on('error', err => {
+          console.error('[youtubei] stream error:', err.message);
           ffmpegProc.stdin.destroy(err);
         });
 
