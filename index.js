@@ -128,11 +128,16 @@ function errorEmbed(msg) {
 }
 
 function nowPlayingEmbed(song, queue) {
-  const isSpotify  = song.source === 'spotify';
-  const loopStatus = queue.loop ? '🔂 Song' : queue.loopQueue ? '🔁 Queue' : '─';
+  const isSpotify     = song.source === 'spotify';
+  const isSoundCloud  = song.source === 'soundcloud';
+  const loopStatus    = queue.loop ? '🔂 Song' : queue.loopQueue ? '🔁 Queue' : '─';
+  const color  = isSpotify ? '#1DB954' : isSoundCloud ? '#FF5500' : '#FF0000';
+  const author = isSpotify ? '🎵  Now Playing  •  via Spotify'
+               : isSoundCloud ? '🎵  Now Playing  •  via SoundCloud'
+               : '▶  Now Playing  •  YouTube';
   return new EmbedBuilder()
-    .setColor(isSpotify ? '#1DB954' : '#FF0000')
-    .setAuthor({ name: isSpotify ? '🎵  Now Playing  •  via Spotify' : '▶  Now Playing  •  YouTube' })
+    .setColor(color)
+    .setAuthor({ name: author })
     .setTitle(song.title)
     .setURL(song.url)
     .setThumbnail(song.thumbnail || null)
@@ -278,20 +283,34 @@ class MusicQueue {
           '-i', proxyUrl, ...ffmpegOutArgs,
         ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
-      // ── 2. yt-dlp with OAuth2 Bearer token ───────────────────────────────────
+      // ── 2. SoundCloud via play-dl (YouTube is IP-blocked on cloud servers) ─────
+      } else if (videoId) {
+        const playdl = require('play-dl');
+        console.log(`[soundcloud] searching: ${song.title}`);
+        const scResults = await playdl.search(song.title, {
+          source: { soundcloud: 'tracks' },
+          limit: 1,
+        });
+        if (!scResults.length) throw new Error(`"${song.title}" not found on SoundCloud`);
+        const scTrack = scResults[0];
+        console.log(`[soundcloud] streaming: ${scTrack.name}`);
+        const scStream = await playdl.stream(scTrack.url);
+        ffmpegProc = spawn(ffmpegPath, ['-i', 'pipe:0', ...ffmpegOutArgs], { stdio: ['pipe', 'pipe', 'pipe'] });
+        scStream.stream.pipe(ffmpegProc.stdin);
+        scStream.stream.on('error', err => {
+          console.error('[soundcloud] stream error:', err.message);
+          ffmpegProc.stdin.destroy(err);
+        });
+        // Update embed info with SoundCloud track details
+        song.source = 'soundcloud';
+        if (scTrack.name)           song.title     = scTrack.name;
+        if (scTrack.thumbnail?.url) song.thumbnail = scTrack.thumbnail.url;
+        if (scTrack.durationInSec)  song.duration  = new Date(scTrack.durationInSec * 1000).toISOString().slice(14, 19);
+
+      // ── 3. yt-dlp for direct / non-YouTube URLs ───────────────────────────────
       } else {
-        const ytdlArgs = [
-          song.url, '-o', '-', '-f', 'bestaudio/best',
-          '--extractor-args', 'youtube:player_client=web',
-          '--no-check-certificates', '--no-playlist', '--quiet',
-        ];
-        const bearer = getOAuthBearerToken();
-        if (bearer) {
-          ytdlArgs.push('--add-header', `Authorization:Bearer ${bearer}`);
-          console.log('[yt-dlp] streaming with OAuth2');
-        } else {
-          console.log('[yt-dlp] streaming (no auth)');
-        }
+        console.log('[yt-dlp] fetching direct URL');
+        const ytdlArgs = [song.url, '-o', '-', '-f', 'bestaudio/best', '--no-check-certificates', '--no-playlist', '--quiet'];
         const ytdlProc = spawn(YTDLP_PATH, ytdlArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
         ffmpegProc = spawn(ffmpegPath, ['-i', 'pipe:0', ...ffmpegOutArgs], { stdio: ['pipe', 'pipe', 'pipe'] });
         ytdlProc.stdout.pipe(ffmpegProc.stdin);
