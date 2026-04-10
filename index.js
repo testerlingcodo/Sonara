@@ -193,17 +193,20 @@ class MusicQueue {
     this.isPlaying   = true;
     try {
       // Pipe yt-dlp stdout directly into ffmpeg — avoids signed URL issues
-      // tv_embedded client bypasses bot detection on cloud IPs without requiring sign-in
+      // android_vr (Daydream) client bypasses bot detection on cloud IPs without auth
       const ytdlArgs = [
         song.url,
         '-o', '-',
         '-f', 'bestaudio/best',
-        '--extractor-args', 'youtube:player_client=tv_embedded,web',
+        '--extractor-args', 'youtube:player_client=android_vr,mweb',
         '--no-check-certificates',
         '--no-playlist',
         '--quiet',
       ];
-      if (fs.existsSync(COOKIES_PATH)) ytdlArgs.push('--cookies', COOKIES_PATH);
+      // Only use cookies if they exist AND are non-empty (expired cookies make things worse)
+      if (fs.existsSync(COOKIES_PATH) && fs.statSync(COOKIES_PATH).size > 0) {
+        ytdlArgs.push('--cookies', COOKIES_PATH);
+      }
       console.log(`[yt-dlp] Fetching: ${song.url}`);
 
       const ytdlProc = spawn(YTDLP_PATH, ytdlArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
