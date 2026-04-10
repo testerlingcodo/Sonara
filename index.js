@@ -193,16 +193,18 @@ class MusicQueue {
     this.isPlaying   = true;
     try {
       // Pipe yt-dlp stdout directly into ffmpeg — avoids signed URL issues
+      // tv_embedded client bypasses bot detection on cloud IPs without requiring sign-in
       const ytdlArgs = [
         song.url,
         '-o', '-',
         '-f', 'bestaudio/best',
-        '--extractor-args', 'youtube:player_client=web',
-        '--js-runtimes', 'node',
+        '--extractor-args', 'youtube:player_client=tv_embedded,web',
         '--no-check-certificates',
+        '--no-playlist',
         '--quiet',
       ];
       if (fs.existsSync(COOKIES_PATH)) ytdlArgs.push('--cookies', COOKIES_PATH);
+      console.log(`[yt-dlp] Fetching: ${song.url}`);
 
       const ytdlProc = spawn(YTDLP_PATH, ytdlArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
 
@@ -220,12 +222,17 @@ class MusicQueue {
       let ytdlErr = '';
       ytdlProc.stderr.on('data', d => { ytdlErr += d.toString(); });
       ytdlProc.on('close', code => {
-        if (code !== 0) console.error('yt-dlp error:', ytdlErr.trim());
-        ffmpegProc.stdin.end();
+        if (code !== 0) {
+          console.error(`[yt-dlp] exit ${code}:`, ytdlErr.trim());
+          ffmpegProc.stdin.destroy(new Error(ytdlErr.trim().split('\n').pop()));
+        } else {
+          ffmpegProc.stdin.end();
+        }
       });
-      ffmpegProc.stderr.on('data', d => {
-        const msg = d.toString();
-        if (!msg.startsWith('f') && !msg.startsWith(' ')) console.error('ffmpeg:', msg.trim());
+      let ffmpegErr = '';
+      ffmpegProc.stderr.on('data', d => { ffmpegErr += d.toString(); });
+      ffmpegProc.on('close', code => {
+        if (code !== 0) console.error(`[ffmpeg] exit ${code}:`, ffmpegErr.slice(-300));
       });
 
       this.resource = createAudioResource(ffmpegProc.stdout, { inputType: StreamType.OggOpus, inlineVolume: true });
