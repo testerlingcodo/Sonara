@@ -59,6 +59,40 @@ async function scrapeSpotifyPlaylist(url) {
   return tracks.map(t => `${t.name} ${t.byArtist?.name || ''}`).filter(Boolean);
 }
 
+// ─── Invidious (bypasses YouTube IP restrictions) ─────────────────────────────
+const INVIDIOUS_INSTANCES = [
+  'https://invidious.io',
+  'https://inv.nadeko.net',
+  'https://invidious.privacydev.net',
+  'https://iv.ggtyler.dev',
+  'https://yt.cdaut.de',
+  'https://invidious.flokinet.to',
+];
+
+async function getInvidiousAudioUrl(videoId) {
+  for (const instance of INVIDIOUS_INSTANCES) {
+    try {
+      const res = await fetch(`${instance}/api/v1/videos/${videoId}?local=true`, {
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (data.error) continue;
+      const audioFormats = (data.adaptiveFormats || [])
+        .filter(f => f.type?.startsWith('audio/') && f.url)
+        .sort((a, b) => (parseInt(b.bitrate) || 0) - (parseInt(a.bitrate) || 0));
+      if (audioFormats[0]?.url) {
+        console.log(`[invidious] Got audio via ${instance}`);
+        return audioFormats[0].url;
+      }
+    } catch (e) {
+      console.error(`[invidious] ${instance} failed:`, e.message);
+    }
+  }
+  return null;
+}
+
 // ─── Embeds ────────────────────────────────────────────────────────────────────
 function errorEmbed(msg) {
   return new EmbedBuilder().setColor('#ED4245').setDescription(`❌  ${msg}`);
@@ -192,46 +226,53 @@ class MusicQueue {
     this.currentSong = song;
     this.isPlaying   = true;
     try {
-      // Pipe yt-dlp stdout directly into ffmpeg — avoids signed URL issues
-      // android_vr (Daydream) client bypasses bot detection on cloud IPs without auth
-      const ytdlArgs = [
-        song.url,
-        '-o', '-',
-        '-f', 'bestaudio/best',
-        '--extractor-args', 'youtube:player_client=android_vr,mweb',
-        '--no-check-certificates',
-        '--no-playlist',
-        '--quiet',
-      ];
-      // Only use cookies if they exist AND are non-empty (expired cookies make things worse)
-      if (fs.existsSync(COOKIES_PATH) && fs.statSync(COOKIES_PATH).size > 0) {
-        ytdlArgs.push('--cookies', COOKIES_PATH);
-      }
-      console.log(`[yt-dlp] Fetching: ${song.url}`);
-
-      const ytdlProc = spawn(YTDLP_PATH, ytdlArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
-
       const eqFilter = this.vocalGain > 0
         ? ['-af', `equalizer=f=1000:width_type=o:width=2:g=${Math.round(this.vocalGain / 2)},equalizer=f=2500:width_type=o:width=2:g=${this.vocalGain}`]
         : [];
 
-      const ffmpegProc = spawn(ffmpegPath, [
-        '-i', 'pipe:0',
-        '-vn', ...eqFilter, '-c:a', 'libopus', '-b:a', '128k', '-ar', '48000', '-ac', '2', '-f', 'ogg', 'pipe:1',
-      ], { stdio: ['pipe', 'pipe', 'pipe'] });
+      // ── Try Invidious first: their servers are unblocked by YouTube ──────────
+      const videoId = song.url.match(/(?:v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/)?.[1];
+      const invAudioUrl = videoId ? await getInvidiousAudioUrl(videoId) : null;
 
-      ytdlProc.stdout.pipe(ffmpegProc.stdin);
+      let ffmpegProc;
 
-      let ytdlErr = '';
-      ytdlProc.stderr.on('data', d => { ytdlErr += d.toString(); });
-      ytdlProc.on('close', code => {
-        if (code !== 0) {
-          console.error(`[yt-dlp] exit ${code}:`, ytdlErr.trim());
-          ffmpegProc.stdin.destroy(new Error(ytdlErr.trim().split('\n').pop()));
-        } else {
-          ffmpegProc.stdin.end();
-        }
-      });
+      if (invAudioUrl) {
+        // Stream directly from Invidious proxy — no yt-dlp needed
+        ffmpegProc = spawn(ffmpegPath, [
+          '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5',
+          '-i', invAudioUrl,
+          '-vn', ...eqFilter, '-c:a', 'libopus', '-b:a', '128k', '-ar', '48000', '-ac', '2', '-f', 'ogg', 'pipe:1',
+        ], { stdio: ['ignore', 'pipe', 'pipe'] });
+      } else {
+        // ── Fallback: pipe yt-dlp into ffmpeg ───────────────────────────────────
+        const ytdlArgs = [
+          song.url, '-o', '-', '-f', 'bestaudio/best',
+          '--extractor-args', 'youtube:player_client=android_vr,mweb',
+          '--no-check-certificates', '--no-playlist', '--quiet',
+        ];
+        if (fs.existsSync(COOKIES_PATH) && fs.statSync(COOKIES_PATH).size > 0)
+          ytdlArgs.push('--cookies', COOKIES_PATH);
+        console.log(`[yt-dlp] Fetching (Invidious failed): ${song.url}`);
+
+        const ytdlProc = spawn(YTDLP_PATH, ytdlArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+        ffmpegProc = spawn(ffmpegPath, [
+          '-i', 'pipe:0',
+          '-vn', ...eqFilter, '-c:a', 'libopus', '-b:a', '128k', '-ar', '48000', '-ac', '2', '-f', 'ogg', 'pipe:1',
+        ], { stdio: ['pipe', 'pipe', 'pipe'] });
+
+        ytdlProc.stdout.pipe(ffmpegProc.stdin);
+        let ytdlErr = '';
+        ytdlProc.stderr.on('data', d => { ytdlErr += d.toString(); });
+        ytdlProc.on('close', code => {
+          if (code !== 0) {
+            console.error(`[yt-dlp] exit ${code}:`, ytdlErr.trim());
+            ffmpegProc.stdin.destroy(new Error(ytdlErr.trim().split('\n').pop()));
+          } else {
+            ffmpegProc.stdin.end();
+          }
+        });
+      }
+
       let ffmpegErr = '';
       ffmpegProc.stderr.on('data', d => { ffmpegErr += d.toString(); });
       ffmpegProc.on('close', code => {
