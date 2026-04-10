@@ -15,14 +15,18 @@ async function getYouTubeInstance() {
   if (_ytInstance) return _ytInstance;
   const { Innertube } = require('youtubei.js');
 
-  // When OAuth2 is active, youtubei.js switches to Google Discovery API format and
-  // appends ?prettyPrint=false&alt=json — InnerTube endpoints reject this with 400.
-  // Strip those params from every request so InnerTube always gets the right format.
+  // When OAuth2 is active, youtubei.js appends ?prettyPrint=false&alt=json
+  // (Google Discovery API format) — InnerTube player endpoint rejects these with 400.
+  // Strip them, but guard against relative URLs which new URL() can't parse.
   const patchedFetch = (url, init) => {
-    const u = new URL(url);
-    u.searchParams.delete('prettyPrint');
-    u.searchParams.delete('alt');
-    return fetch(u.toString(), init);
+    try {
+      const u = new URL(url);
+      u.searchParams.delete('prettyPrint');
+      u.searchParams.delete('alt');
+      return fetch(u.toString(), init);
+    } catch {
+      return fetch(url, init); // relative URL — pass through unchanged
+    }
   };
 
   _ytInstance = await Innertube.create({ fetch: patchedFetch });
