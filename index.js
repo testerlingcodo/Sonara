@@ -298,9 +298,18 @@ class MusicQueue {
 
       // ── 2. youtubei.js InnerTube API (works with OAuth2 from any IP) ──────────
       } else if (videoId) {
-        console.log('[youtubei] streaming');
         const yt = await getYouTubeInstance();
-        const ytStream = await yt.download(videoId, { type: 'audio', quality: 'bestefficiency', client: 'IOS' });
+        let ytStream = null;
+        for (const client of ['ANDROID', 'IOS', 'TVHTML5', 'WEB']) {
+          try {
+            console.log(`[youtubei] trying ${client}`);
+            ytStream = await yt.download(videoId, { type: 'audio', quality: 'bestefficiency', client });
+            break;
+          } catch (e) {
+            console.error(`[youtubei] ${client} failed:`, e.message.slice(0, 120));
+          }
+        }
+        if (!ytStream) throw new Error('All YouTube clients failed');
         const nodeStream = Readable.fromWeb(ytStream);
         ffmpegProc = spawn(ffmpegPath, ['-i', 'pipe:0', ...ffmpegOutArgs], { stdio: ['pipe', 'pipe', 'pipe'] });
         nodeStream.pipe(ffmpegProc.stdin);
