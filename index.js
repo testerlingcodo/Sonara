@@ -59,38 +59,55 @@ async function scrapeSpotifyPlaylist(url) {
   return tracks.map(t => `${t.name} ${t.byArtist?.name || ''}`).filter(Boolean);
 }
 
-// ─── Invidious (bypasses YouTube IP restrictions) ─────────────────────────────
-const INVIDIOUS_INSTANCES = [
-  'https://invidious.io',
-  'https://inv.nadeko.net',
-  'https://invidious.privacydev.net',
-  'https://iv.ggtyler.dev',
-  'https://yt.cdaut.de',
-  'https://invidious.flokinet.to',
-];
+// ─── Proxy audio fetch (Piped + Invidious in parallel) ────────────────────────
+// Bypasses YouTube IP restrictions on cloud servers — all sources raced at once.
 
-async function getInvidiousAudioUrl(videoId) {
-  for (const instance of INVIDIOUS_INSTANCES) {
-    try {
-      const res = await fetch(`${instance}/api/v1/videos/${videoId}?local=true`, {
-        headers: { 'User-Agent': 'Mozilla/5.0' },
-        signal: AbortSignal.timeout(8000),
-      });
-      if (!res.ok) continue;
-      const data = await res.json();
-      if (data.error) continue;
-      const audioFormats = (data.adaptiveFormats || [])
-        .filter(f => f.type?.startsWith('audio/') && f.url)
-        .sort((a, b) => (parseInt(b.bitrate) || 0) - (parseInt(a.bitrate) || 0));
-      if (audioFormats[0]?.url) {
-        console.log(`[invidious] Got audio via ${instance}`);
-        return audioFormats[0].url;
-      }
-    } catch (e) {
-      console.error(`[invidious] ${instance} failed:`, e.message);
-    }
+async function _fetchPiped(instance, videoId) {
+  const res = await fetch(`${instance}/streams/${videoId}`, {
+    headers: { 'User-Agent': 'Mozilla/5.0' },
+    signal: AbortSignal.timeout(7000),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  if (!data.audioStreams?.length) throw new Error('no streams');
+  const best = [...data.audioStreams].sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+  if (!best?.url) throw new Error('no url');
+  console.log(`[proxy] audio via Piped ${instance}`);
+  return best.url;
+}
+
+async function _fetchInvidious(instance, videoId) {
+  const res = await fetch(`${instance}/api/v1/videos/${videoId}?local=true`, {
+    headers: { 'User-Agent': 'Mozilla/5.0' },
+    signal: AbortSignal.timeout(7000),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  const audio = (data.adaptiveFormats || [])
+    .filter(f => f.type?.startsWith('audio/') && f.url)
+    .sort((a, b) => (parseInt(b.bitrate) || 0) - (parseInt(a.bitrate) || 0))[0];
+  if (!audio?.url) throw new Error('no formats');
+  console.log(`[proxy] audio via Invidious ${instance}`);
+  return audio.url;
+}
+
+async function getProxiedAudioUrl(videoId) {
+  try {
+    return await Promise.any([
+      _fetchPiped('https://pipedapi.kavin.rocks', videoId),
+      _fetchPiped('https://pipedapi.adminforge.de', videoId),
+      _fetchPiped('https://piped-api.garudalinux.org', videoId),
+      _fetchInvidious('https://inv.nadeko.net', videoId),
+      _fetchInvidious('https://invidious.privacydev.net', videoId),
+      _fetchInvidious('https://iv.ggtyler.dev', videoId),
+      _fetchInvidious('https://invidious.flokinet.to', videoId),
+    ]);
+  } catch (e) {
+    const reasons = (e instanceof AggregateError ? e.errors : [e]).map(x => x.message).join(' | ');
+    console.error('[proxy] all sources failed:', reasons);
+    return null;
   }
-  return null;
 }
 
 // ─── Embeds ────────────────────────────────────────────────────────────────────
@@ -232,15 +249,15 @@ class MusicQueue {
 
       // ── Try Invidious first: their servers are unblocked by YouTube ──────────
       const videoId = song.url.match(/(?:v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/)?.[1];
-      const invAudioUrl = videoId ? await getInvidiousAudioUrl(videoId) : null;
+      const proxyAudioUrl = videoId ? await getProxiedAudioUrl(videoId) : null;
 
       let ffmpegProc;
 
-      if (invAudioUrl) {
-        // Stream directly from Invidious proxy — no yt-dlp needed
+      if (proxyAudioUrl) {
+        // Stream directly from Piped/Invidious proxy — no yt-dlp needed
         ffmpegProc = spawn(ffmpegPath, [
           '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5',
-          '-i', invAudioUrl,
+          '-i', proxyAudioUrl,
           '-vn', ...eqFilter, '-c:a', 'libopus', '-b:a', '128k', '-ar', '48000', '-ac', '2', '-f', 'ogg', 'pipe:1',
         ], { stdio: ['ignore', 'pipe', 'pipe'] });
       } else {
