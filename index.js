@@ -2,6 +2,7 @@ const { Client, GatewayIntentBits, EmbedBuilder, ActivityType, ActionRowBuilder,
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, entersState, StreamType } = require('@discordjs/voice');
 const { spawn } = require('child_process');
 const { constants: ytdlConstants } = require('youtube-dl-exec');
+const ytdl = require('@distube/ytdl-core');
 const ffmpegPath = require('ffmpeg-static');
 const ytSearch = require('yt-search');
 const fs = require('fs');
@@ -246,37 +247,43 @@ class MusicQueue {
       const eqFilter = this.vocalGain > 0
         ? ['-af', `equalizer=f=1000:width_type=o:width=2:g=${Math.round(this.vocalGain / 2)},equalizer=f=2500:width_type=o:width=2:g=${this.vocalGain}`]
         : [];
+      const ffmpegOutArgs = ['-vn', ...eqFilter, '-c:a', 'libopus', '-b:a', '128k', '-ar', '48000', '-ac', '2', '-f', 'ogg', 'pipe:1'];
 
-      // ── Try Invidious first: their servers are unblocked by YouTube ──────────
       const videoId = song.url.match(/(?:v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/)?.[1];
-      const proxyAudioUrl = videoId ? await getProxiedAudioUrl(videoId) : null;
 
       let ffmpegProc;
 
-      if (proxyAudioUrl) {
-        // Stream directly from Piped/Invidious proxy — no yt-dlp needed
+      // ── 1. Piped / Invidious proxy ────────────────────────────────────────────
+      const proxyUrl = videoId ? await getProxiedAudioUrl(videoId) : null;
+
+      if (proxyUrl) {
         ffmpegProc = spawn(ffmpegPath, [
           '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5',
-          '-i', proxyAudioUrl,
-          '-vn', ...eqFilter, '-c:a', 'libopus', '-b:a', '128k', '-ar', '48000', '-ac', '2', '-f', 'ogg', 'pipe:1',
+          '-i', proxyUrl, ...ffmpegOutArgs,
         ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+      // ── 2. @distube/ytdl-core (InnerTube API — different extraction path) ────
+      } else if (videoId && ytdl.validateID(videoId)) {
+        console.log('[ytdl-core] streaming');
+        const ytdlStream = ytdl(song.url, { filter: 'audioonly', quality: 'highestaudio' });
+        ffmpegProc = spawn(ffmpegPath, ['-i', 'pipe:0', ...ffmpegOutArgs], { stdio: ['pipe', 'pipe', 'pipe'] });
+        ytdlStream.pipe(ffmpegProc.stdin);
+        ytdlStream.on('error', err => {
+          console.error('[ytdl-core] stream error:', err.message);
+          ffmpegProc.stdin.destroy(err);
+        });
+
+      // ── 3. yt-dlp (direct piping, last resort) ───────────────────────────────
       } else {
-        // ── Fallback: pipe yt-dlp into ffmpeg ───────────────────────────────────
         const ytdlArgs = [
           song.url, '-o', '-', '-f', 'bestaudio/best',
-          '--extractor-args', 'youtube:player_client=android_vr,mweb',
           '--no-check-certificates', '--no-playlist', '--quiet',
         ];
         if (fs.existsSync(COOKIES_PATH) && fs.statSync(COOKIES_PATH).size > 0)
           ytdlArgs.push('--cookies', COOKIES_PATH);
-        console.log(`[yt-dlp] Fetching (Invidious failed): ${song.url}`);
-
+        console.log('[yt-dlp] fetching');
         const ytdlProc = spawn(YTDLP_PATH, ytdlArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
-        ffmpegProc = spawn(ffmpegPath, [
-          '-i', 'pipe:0',
-          '-vn', ...eqFilter, '-c:a', 'libopus', '-b:a', '128k', '-ar', '48000', '-ac', '2', '-f', 'ogg', 'pipe:1',
-        ], { stdio: ['pipe', 'pipe', 'pipe'] });
-
+        ffmpegProc = spawn(ffmpegPath, ['-i', 'pipe:0', ...ffmpegOutArgs], { stdio: ['pipe', 'pipe', 'pipe'] });
         ytdlProc.stdout.pipe(ffmpegProc.stdin);
         let ytdlErr = '';
         ytdlProc.stderr.on('data', d => { ytdlErr += d.toString(); });
