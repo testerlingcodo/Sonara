@@ -2,55 +2,23 @@ const { Client, GatewayIntentBits, EmbedBuilder, ActivityType, ActionRowBuilder,
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, entersState, StreamType } = require('@discordjs/voice');
 const { spawn } = require('child_process');
 const { constants: ytdlConstants } = require('youtube-dl-exec');
-const { Readable } = require('stream');
 const ffmpegPath = require('ffmpeg-static');
 const ytSearch = require('yt-search');
 const fs = require('fs');
 const http = require('http');
 require('dotenv').config();
 
-// ─── youtubei.js (InnerTube API with OAuth2) ───────────────────────────────────
-let _ytInstance = null;
-async function getYouTubeInstance() {
-  if (_ytInstance) return _ytInstance;
-  const { Innertube } = require('youtubei.js');
-
-  // When OAuth2 is active, youtubei.js appends ?prettyPrint=false&alt=json
-  // (Google Discovery API format) — InnerTube player endpoint rejects these with 400.
-  // Strip them, but guard against relative URLs which new URL() can't parse.
-  const patchedFetch = (url, init) => {
-    try {
-      const u = new URL(url);
-      u.searchParams.delete('prettyPrint');
-      u.searchParams.delete('alt');
-      return fetch(u.toString(), init);
-    } catch {
-      return fetch(url, init); // relative URL — pass through unchanged
-    }
-  };
-
-  _ytInstance = await Innertube.create({ fetch: patchedFetch });
-
-  if (process.env.YOUTUBE_OAUTH_TOKENS) {
-    try {
-      const creds = JSON.parse(
-        Buffer.from(process.env.YOUTUBE_OAUTH_TOKENS, 'base64').toString('utf8')
-      );
-      await _ytInstance.session.signIn(creds);
-      console.log('✅ YouTube OAuth2 signed in');
-    } catch (e) {
-      console.error('Failed to sign in with YOUTUBE_OAUTH_TOKENS:', e.message);
-    }
-  }
-
-  _ytInstance.session.on('update-credentials', ({ credentials }) => {
-    console.log('🔑 OAuth2 tokens refreshed — update YOUTUBE_OAUTH_TOKENS on Render:');
-    console.log(Buffer.from(JSON.stringify(credentials)).toString('base64'));
-  });
-  return _ytInstance;
+// Extract OAuth2 access token from env (set once via oauth2-setup.js)
+function getOAuthBearerToken() {
+  if (!process.env.YOUTUBE_OAUTH_TOKENS) return null;
+  try {
+    const { access_token } = JSON.parse(
+      Buffer.from(process.env.YOUTUBE_OAUTH_TOKENS, 'base64').toString('utf8')
+    );
+    return access_token || null;
+  } catch { return null; }
 }
-// Pre-warm the instance at startup
-getYouTubeInstance().catch(e => console.error('youtubei init error:', e.message));
+if (getOAuthBearerToken()) console.log('✅ YouTube OAuth2 token ready');
 
 const PREFIX = '!s';
 
@@ -310,37 +278,20 @@ class MusicQueue {
           '-i', proxyUrl, ...ffmpegOutArgs,
         ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
-      // ── 2. youtubei.js InnerTube API (works with OAuth2 from any IP) ──────────
-      } else if (videoId) {
-        const yt = await getYouTubeInstance();
-        let ytStream = null;
-        for (const client of ['ANDROID', 'IOS', 'TVHTML5', 'WEB']) {
-          try {
-            console.log(`[youtubei] trying ${client}`);
-            ytStream = await yt.download(videoId, { type: 'audio', quality: 'bestefficiency', client });
-            break;
-          } catch (e) {
-            console.error(`[youtubei] ${client} failed:`, e.message.slice(0, 120));
-          }
-        }
-        if (!ytStream) throw new Error('All YouTube clients failed');
-        const nodeStream = Readable.fromWeb(ytStream);
-        ffmpegProc = spawn(ffmpegPath, ['-i', 'pipe:0', ...ffmpegOutArgs], { stdio: ['pipe', 'pipe', 'pipe'] });
-        nodeStream.pipe(ffmpegProc.stdin);
-        nodeStream.on('error', err => {
-          console.error('[youtubei] stream error:', err.message);
-          ffmpegProc.stdin.destroy(err);
-        });
-
-      // ── 3. yt-dlp (direct piping, last resort) ───────────────────────────────
+      // ── 2. yt-dlp with OAuth2 Bearer token ───────────────────────────────────
       } else {
         const ytdlArgs = [
           song.url, '-o', '-', '-f', 'bestaudio/best',
+          '--extractor-args', 'youtube:player_client=web',
           '--no-check-certificates', '--no-playlist', '--quiet',
         ];
-        if (fs.existsSync(COOKIES_PATH) && fs.statSync(COOKIES_PATH).size > 0)
-          ytdlArgs.push('--cookies', COOKIES_PATH);
-        console.log('[yt-dlp] fetching');
+        const bearer = getOAuthBearerToken();
+        if (bearer) {
+          ytdlArgs.push('--add-header', `Authorization:Bearer ${bearer}`);
+          console.log('[yt-dlp] streaming with OAuth2');
+        } else {
+          console.log('[yt-dlp] streaming (no auth)');
+        }
         const ytdlProc = spawn(YTDLP_PATH, ytdlArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
         ffmpegProc = spawn(ffmpegPath, ['-i', 'pipe:0', ...ffmpegOutArgs], { stdio: ['pipe', 'pipe', 'pipe'] });
         ytdlProc.stdout.pipe(ffmpegProc.stdin);
