@@ -14,16 +14,20 @@ let _ytInstance = null;
 async function getYouTubeInstance() {
   if (_ytInstance) return _ytInstance;
   const { Innertube } = require('youtubei.js');
-  const opts = { generate_session_locally: true };
+  _ytInstance = await Innertube.create({ generate_session_locally: true });
+
   if (process.env.YOUTUBE_OAUTH_TOKENS) {
     try {
-      opts.credentials = JSON.parse(
+      const creds = JSON.parse(
         Buffer.from(process.env.YOUTUBE_OAUTH_TOKENS, 'base64').toString('utf8')
       );
-      console.log('✅ YouTube OAuth2 tokens loaded');
-    } catch { console.error('Invalid YOUTUBE_OAUTH_TOKENS env var'); }
+      await _ytInstance.session.signIn(creds);
+      console.log('✅ YouTube OAuth2 signed in');
+    } catch (e) {
+      console.error('Failed to sign in with YOUTUBE_OAUTH_TOKENS:', e.message);
+    }
   }
-  _ytInstance = await Innertube.create(opts);
+
   _ytInstance.session.on('update-credentials', ({ credentials }) => {
     console.log('🔑 OAuth2 tokens refreshed — update YOUTUBE_OAUTH_TOKENS on Render:');
     console.log(Buffer.from(JSON.stringify(credentials)).toString('base64'));
