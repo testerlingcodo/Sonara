@@ -14,8 +14,18 @@ let _ytInstance = null;
 async function getYouTubeInstance() {
   if (_ytInstance) return _ytInstance;
   const { Innertube } = require('youtubei.js');
-  // No generate_session_locally — it produces invalid visitor_data that conflicts with OAuth2
-  _ytInstance = await Innertube.create();
+
+  // When OAuth2 is active, youtubei.js switches to Google Discovery API format and
+  // appends ?prettyPrint=false&alt=json — InnerTube endpoints reject this with 400.
+  // Strip those params from every request so InnerTube always gets the right format.
+  const patchedFetch = (url, init) => {
+    const u = new URL(url);
+    u.searchParams.delete('prettyPrint');
+    u.searchParams.delete('alt');
+    return fetch(u.toString(), init);
+  };
+
+  _ytInstance = await Innertube.create({ fetch: patchedFetch });
 
   if (process.env.YOUTUBE_OAUTH_TOKENS) {
     try {
