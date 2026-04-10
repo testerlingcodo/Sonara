@@ -20,6 +20,13 @@ function getOAuthBearerToken() {
 }
 if (getOAuthBearerToken()) console.log('✅ YouTube OAuth2 token ready');
 
+// ─── play-dl: initialize SoundCloud client ID at startup ──────────────────────
+const playdl = require('play-dl');
+playdl.getFreeClientID()
+  .then(id => playdl.setToken({ soundcloud: { client_id: id } }))
+  .then(() => console.log('✅ SoundCloud client ready'))
+  .catch(e => console.error('SoundCloud init failed:', e.message));
+
 const PREFIX = '!s';
 
 // Use system yt-dlp (latest, installed via Dockerfile) with fallback to bundled
@@ -285,7 +292,6 @@ class MusicQueue {
 
       // ── 2. SoundCloud via play-dl (YouTube is IP-blocked on cloud servers) ─────
       } else if (videoId) {
-        const playdl = require('play-dl');
         console.log(`[soundcloud] searching: ${song.title}`);
         const scResults = await playdl.search(song.title, {
           source: { soundcloud: 'tracks' },
